@@ -84,6 +84,7 @@ def test_tracking_worker_reaches_video_end_without_skipping(tmp_path):
     from backend.service import TrackingService
     from types import SimpleNamespace
     service=TrackingService();seen=[]
+    service.select_tracking_mode('precise')
     def infer(frames,masks):
         time.sleep(.1)
         seen.extend(f.source_index for f in frames[1:])

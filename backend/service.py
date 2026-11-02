@@ -6,6 +6,7 @@ import cv2
 from .camera import Camera
 from .geometry import measure, png_mask
 from .model import SamEngine
+from .motion import MotionTracker
 
 COLORS = ['#48ddac','#69a6ff','#ffb866','#ce8eff','#ff788e','#73dce8']
 
@@ -26,6 +27,17 @@ class TrackingService:
         self.engine = SamEngine()
         self.model_name = 'sam2.1'
         self.lock = threading.RLock()
+        self.engine_lock=threading.RLock()
+        self.tracking_mode='smooth'
+        self.revision=0
+        self.motion=None
+        self.ai_seed=None
+        self.ai_busy=False
+        self.ai_updates=0
+        self.ai_retry_at=0
+        self.ai_error=None
+        self.motion_fps=None
+        self.last_ai_frame=None
         self.shutdown_event = threading.Event()
         self.running = False
         self.editing = False
@@ -41,9 +53,14 @@ class TrackingService:
         self.inference_fps = None
         self.worker = threading.Thread(target=self._loop,daemon=True)
         self.worker.start()
+        self.motion_worker=threading.Thread(target=self._motion_loop,daemon=True)
+        self.motion_worker.start()
 
     def status(self):
         return dict(server_version='0.3.0',model_name=self.model_name,
+                    tracking_mode=self.tracking_mode,ai_busy=self.ai_busy,ai_updates=self.ai_updates,
+                    ai_error=self.ai_error,
+                    motion_fps=self.motion_fps,last_ai_frame=self.last_ai_frame,
                     model_precision=getattr(self.engine,'precision',None) if self.model_name=='sam3.1' else 'FP32',
                     camera_connected=self.camera.connected,camera_error=self.camera.error,
                     source=self.camera.source,camera_fps=round(self.camera.fps,1),
@@ -57,7 +74,7 @@ class TrackingService:
                     active_objects=sum(1 for m in self.masks.values() if m.any()))
 
     def load(self):
-        with self.lock:
+        with self.lock,self.engine_lock:
             self.engine.load()
         return self.status()
 
@@ -65,7 +82,7 @@ class TrackingService:
         import gc
         import torch
         self.running=False
-        with self.lock:
+        with self.lock,self.engine_lock:
             if self.model_name=='sam3.1':self.engine.close()
             else:
                 self.engine.predictor=None
@@ -77,6 +94,7 @@ class TrackingService:
     def select_model(self,name):
         if name not in ('sam2.1','sam3.1'):raise ValueError('지원하지 않는 모델입니다.')
         self.running=False
+        self.camera.pause_media()
         with self.lock:
             if name!=self.model_name:
                 self.release_model();self.reset()
@@ -92,6 +110,7 @@ class TrackingService:
         prompt=concept_prompt(text)
         if self.model_name!='sam3.1':raise ValueError('텍스트 선택은 SAM 3.1 모드에서 사용할 수 있습니다.')
         self.running=False
+        self.camera.pause_media();self.revision+=1
         with self.lock:
             frame=self.camera.find(frame_id)
             if frame is None:
@@ -99,7 +118,7 @@ class TrackingService:
                 frame=record[0] if record else None
             if frame is None:raise ValueError('프레임이 만료됐습니다. 최신 영상으로 다시 선택하세요.')
             start=time.perf_counter()
-            predictions=self.engine.segment_text(frame,prompt)
+            with self.engine_lock:predictions=self.engine.segment_text(frame,prompt)
             predictions={i:m for i,m in predictions.items() if m.any()}
             if not predictions:raise ValueError(f'"{prompt}"에 해당하는 객체를 찾지 못했습니다.')
             self.objects.clear();self.masks.clear();self.history.clear()
@@ -141,7 +160,11 @@ class TrackingService:
 
     def reset(self):
         self.running = False
+        self.camera.pause_media()
         with self.lock:
+            self.revision+=1;self.motion=None;self.ai_seed=None
+            self.ai_updates=0;self.motion_fps=None;self.last_ai_frame=None
+            self.ai_error=None;self.ai_retry_at=0
             self.objects.clear()
             self.masks.clear()
             self.history.clear()
@@ -156,7 +179,10 @@ class TrackingService:
 
     def pin(self, frame_id):
         self.running = False
+        self.camera.pause_media()
+        self.revision+=1
         with self.lock:
+            self.motion=None;self.ai_seed=None
             record = next((r for r in reversed(self.history) if r[0].id==frame_id),None)
             if self.objects and not record:
                 raise ValueError('객체 보정은 분석 프레임에서 가능합니다. 분석 보기를 선택하고 다시 시도하세요.')
@@ -197,7 +223,7 @@ class TrackingService:
                 raise ValueError('하나 이상의 포함 지점이 필요합니다.')
             if points:
                 start = time.perf_counter()
-                outputs = self.engine.infer([self.anchor],self.masks,target=obj_id,points=points)
+                with self.engine_lock:outputs = self.engine.infer([self.anchor],self.masks,target=obj_id,points=points)
                 self.masks = outputs[-1][1]
                 self.inference_ms = round((time.perf_counter()-start)*1000,1)
             else:
@@ -209,6 +235,7 @@ class TrackingService:
 
     def delete(self,obj_id):
         self.running = False
+        self.camera.pause_media();self.revision+=1
         with self.lock:
             if obj_id not in self.objects:
                 raise ValueError('객체가 존재하지 않습니다.')
@@ -221,6 +248,7 @@ class TrackingService:
     def control(self,action):
         if action=='pause':
             self.running = False
+            self.camera.pause_media();self.revision+=1
             with self.lock:
                 return self.status()
         if action=='stop':
@@ -232,6 +260,11 @@ class TrackingService:
                 raise ValueError('포함 지점을 추가하여 객체를 분할한 뒤 추적하세요.')
             self.editing = False
             self.error = None
+            self.revision+=1
+            if self.tracking_mode=='smooth' and self.camera.input_kind!='image':
+                self.motion=MotionTracker(self.anchor,self.masks)
+                self.ai_seed=(self.anchor,{i:m.copy() for i,m in self.masks.items()})
+            self.camera.play_media(self.tracking_mode=='smooth')
             self.running = self.camera.input_kind!='image'
         return self.status()
 
@@ -255,7 +288,9 @@ class TrackingService:
                               'Lost' if obj['points'] or obj.get('source_prompt') or obj_id in masks else 'Pending'),frame_id=frame.id,
                               timestamp=frame.timestamp,
                               mask_png=png_mask(mask) if mask is not None else None))
-        self.packet = dict(frame=frame_packet(frame),objects=objects)
+        self.packet = dict(frame=frame_packet(frame),objects=objects,
+                          tracking_method='optical-flow+SAM' if self.motion is not None and self.motion.frame.id==frame.id and self.tracking_mode=='smooth' else 'SAM',
+                          model=self.model_name)
         self.history.append((frame,dict(masks)))
         self.version += 1
 
@@ -268,6 +303,9 @@ class TrackingService:
                 self.error = self.camera.error or '카메라 연결이 해제되었습니다.'
                 continue
             try:
+                if self.tracking_mode=='smooth':
+                    self._smooth_ai()
+                    continue
                 with self.lock:
                     if not self.running or self.anchor is None:
                         continue
@@ -276,7 +314,7 @@ class TrackingService:
                         if self.camera.media_ended:self.running=False
                         continue
                     start = time.perf_counter()
-                    outputs = self.engine.infer([self.anchor]+frames,self.masks)
+                    with self.engine_lock:outputs = self.engine.infer([self.anchor]+frames,self.masks)
                     elapsed = time.perf_counter()-start
                     self.inference_ms = round(elapsed*1000,1)
                     self.inference_fps = round(len(frames)/elapsed,2)
@@ -287,9 +325,59 @@ class TrackingService:
                 self.error = f'추론 실패: {exc}'
                 self.running = False
 
+    def select_tracking_mode(self,mode):
+        if mode not in ('smooth','precise'):raise ValueError('지원하지 않는 추적 방식입니다.')
+        self.control('pause')
+        with self.lock:self.tracking_mode=mode
+        return self.status()
+
+    def _smooth_ai(self):
+        with self.lock:
+            if not self.running or self.motion is None or self.ai_seed is None or time.monotonic()<self.ai_retry_at:return
+            seed,masks=self.ai_seed;target=self.motion.frame
+            if target.id==seed.id or not any(m.any() for m in masks.values()):return
+            motion=self.motion;revision=self.revision;base=motion.snapshot()
+            self.ai_busy=True
+        try:
+            start=time.perf_counter()
+            with self.engine_lock:outputs=self.engine.infer([seed,target],masks)
+            elapsed=time.perf_counter()-start
+            with self.lock:
+                if not self.running or revision!=self.revision or self.motion is not motion:return
+                self.inference_ms=round(elapsed*1000,1);self.inference_fps=round(1/elapsed,2)
+                if outputs and motion.correct(outputs[-1][1],base):
+                    self.masks={i:m.copy() for i,m in motion.masks.items()}
+                    self.ai_updates+=1;self.last_ai_frame=target.id
+                self.ai_error=None
+                self.ai_seed=(motion.frame,{i:m.copy() for i,m in motion.masks.items()})
+        except Exception as exc:
+            with self.lock:
+                if revision==self.revision:
+                    self.ai_error=f'SAM 보정 실패 · 광학흐름만 진행 중: {exc}'
+                    self.ai_retry_at=time.monotonic()+5
+        finally:self.ai_busy=False
+
+    def _motion_loop(self):
+        last_time=time.monotonic()
+        while not self.shutdown_event.wait(.015):
+            if not self.running or self.tracking_mode!='smooth':continue
+            try:
+                with self.lock:
+                    if not self.running or self.motion is None:continue
+                    frame=self.camera.latest()
+                    if frame is not None and frame.id!=self.motion.frame.id:
+                        self.masks=dict(self.motion.advance(frame))
+                        self.anchor=frame
+                        self._publish(frame,self.masks)
+                        now=time.monotonic();self.motion_fps=round(1/max(.001,now-last_time),1);last_time=now
+                    elif self.camera.media_ended:self.running=False
+            except Exception as exc:
+                self.error=f'연속 추적 실패: {exc}';self.running=False;self.camera.pause_media()
+
     def close(self):
         self.running = False
         self.shutdown_event.set()
         self.worker.join(timeout=30)
+        self.motion_worker.join(timeout=5)
         self.camera.stop()
         if self.model_name=='sam3.1':self.engine.close()

@@ -84,6 +84,15 @@ class Control(BaseModel):
     action: Literal['start','pause','stop']
 
 
+class TrackingMode(BaseModel):
+    mode: Literal['smooth','precise']
+
+
+@app.post('/api/tracking/mode')
+async def tracking_mode(body:TrackingMode):
+    return await invoke(service.select_tracking_mode,body.mode)
+
+
 class ModelSelect(BaseModel):
     model: Literal['sam2.1','sam3.1']
 
@@ -274,6 +283,7 @@ async def export(kind:Literal['json','csv']):
     if not packet:
         raise HTTPException(400,'내보낼 분석 결과가 없습니다.')
     clean = dict(frame={k:v for k,v in packet['frame'].items() if k!='jpeg'},
+                 tracking_method=packet.get('tracking_method','SAM'),model=packet.get('model',service.model_name),
                  coordinates='origin: top-left; x: right; y: down; bbox: inclusive; units: px, px^2',
                  objects=[{k:v for k,v in o.items() if k!='mask_png'} for o in packet['objects']])
     if kind=='json':

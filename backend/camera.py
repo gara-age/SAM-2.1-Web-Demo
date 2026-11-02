@@ -35,6 +35,8 @@ class Camera:
         self.media_total = 0
         self.media_fps = 0.0
         self.media_ended = False
+        self.play_event=threading.Event()
+        self.continuous=False
 
     @staticmethod
     def discover():
@@ -105,8 +107,34 @@ class Camera:
                 self.frames.clear()
                 self.frames.append(Frame(self.next_id,time.time(),image,0,0.0))
                 self.next_id+=1
+            if kind=='video':
+                self.stop_event.clear()
+                self.thread=threading.Thread(target=self._video_loop,daemon=True)
+                self.thread.start()
         finally:
             if cap is not None:cap.release()
+
+    def play_media(self,continuous):
+        self.continuous=continuous
+        if continuous and self.input_kind=='video':self.play_event.set()
+
+    def pause_media(self):
+        self.play_event.clear()
+
+    def _video_loop(self):
+        while not self.stop_event.wait(.001):
+            if not self.play_event.wait(.03):continue
+            start=time.monotonic()
+            with self.lock:
+                if not self.play_event.is_set() or self.media_cap is None:continue
+                ok,image=self.media_cap.read()
+                if not ok:
+                    self.media_ended=True;self.play_event.clear();continue
+                self.media_index+=1
+                self.frames.append(Frame(self.next_id,time.time(),image,self.media_index,self.media_index/self.media_fps))
+                self.next_id+=1
+                self.fps=self.media_fps
+            self.stop_event.wait(max(0,1/self.media_fps-(time.monotonic()-start)))
 
     def _loop(self, cap, width, height, fps,sample=None):
         times = deque(maxlen=60)
@@ -154,7 +182,7 @@ class Camera:
             return next((f for f in reversed(self.frames) if f.id==frame_id), None)
 
     def after(self, frame_id, limit=4):
-        if self.input_kind in ('image','video'):
+        if self.input_kind in ('image','video') and not self.continuous:
             # File playback advances only when inference requests the next frames.
             # Slow models never skip video frames or run past a paused selection.
             with self.lock:
@@ -176,6 +204,7 @@ class Camera:
         return [candidates[i] for i in np.linspace(0,len(candidates)-1,limit,dtype=int)]
 
     def stop(self):
+        self.pause_media();self.continuous=False
         self.stop_event.set()
         if self.thread is not None:
             self.thread.join(timeout=4)
