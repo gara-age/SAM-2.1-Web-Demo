@@ -83,7 +83,7 @@ def test_upload_image_video_rewind_invalid_files_and_exports(tmp_path,monkeypatc
 def test_tracking_worker_reaches_video_end_without_skipping(tmp_path):
     from backend.service import TrackingService
     from types import SimpleNamespace
-    service=TrackingService();seen=[]
+    service=TrackingService(recordings_root=tmp_path/'results');seen=[]
     service.select_tracking_mode('precise')
     def infer(frames,masks):
         time.sleep(.1)

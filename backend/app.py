@@ -185,6 +185,22 @@ def status():
     return service.status()
 
 
+@app.get('/api/recordings')
+async def list_recordings():
+    return await invoke(service.recordings.list)
+
+
+@app.get('/api/recordings/{key}/video')
+async def recording_video(key:str,download:bool=False):
+    try:result=await invoke(service.recordings.get,key)
+    except HTTPException as exc:raise HTTPException(404,'결과 영상을 찾을 수 없습니다.') from exc
+    if not result['video_url']:raise HTTPException(409,'아직 재생할 수 있는 결과 영상이 없습니다.')
+    path=service.recordings.folder(key)/'tracking.mp4'
+    return FileResponse(path,media_type='video/mp4',
+                        filename=f"{result['model']}-tracking-{key[:8]}.mp4" if download else None,
+                        headers={'Cache-Control':'no-cache'})
+
+
 @app.get('/api/cameras')
 async def cameras():
     if service.camera.connected:

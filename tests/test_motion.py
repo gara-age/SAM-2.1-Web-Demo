@@ -65,7 +65,7 @@ def test_both_models_play_while_slow_sam_runs_and_pause_is_responsive(tmp_path):
 
 
 @pytest.mark.parametrize('model',['sam2.1','sam3.1'])
-def test_live_input_keeps_overlay_moving_during_slow_ai(model):
+def test_live_input_keeps_results_updating_during_slow_ai(model):
     service=TrackingService()
     def infer(frames,masks):
         time.sleep(.8)
@@ -78,7 +78,9 @@ def test_live_input_keeps_overlay_moving_during_slow_ai(model):
         while service.camera.latest() is None and time.monotonic()<deadline:time.sleep(.01)
         frame=service.camera.latest();service.pin(frame.id)
         obj_id=service.new_object()['id']
-        mask=np.all(frame.image==[45,165,240],axis=2)
+        # The fixed blue circle avoids the clock-dependent rectangle/circle
+        # occlusion in the synthetic camera. Moving geometry is tested above.
+        mask=np.all(frame.image==[200,90,60],axis=2)
         service.masks={obj_id:mask};service._publish(frame,service.masks)
         service.control('start')
         deadline=time.monotonic()+1.5

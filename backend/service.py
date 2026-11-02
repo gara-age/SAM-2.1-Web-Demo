@@ -7,6 +7,7 @@ from .camera import Camera
 from .geometry import measure, png_mask
 from .model import SamEngine
 from .motion import MotionTracker
+from .recordings import RecordingStore
 
 COLORS = ['#48ddac','#69a6ff','#ffb866','#ce8eff','#ff788e','#73dce8']
 
@@ -22,7 +23,8 @@ def frame_packet(frame):
 
 
 class TrackingService:
-    def __init__(self):
+    def __init__(self,recordings_root=None):
+        self.recordings=RecordingStore(recordings_root)
         self.camera = Camera()
         self.engine = SamEngine()
         self.model_name = 'sam2.1'
@@ -58,6 +60,7 @@ class TrackingService:
 
     def status(self):
         return dict(server_version='0.3.0',model_name=self.model_name,
+                    recording=self.recordings.status(),
                     tracking_mode=self.tracking_mode,ai_busy=self.ai_busy,ai_updates=self.ai_updates,
                     ai_error=self.ai_error,
                     motion_fps=self.motion_fps,last_ai_frame=self.last_ai_frame,
@@ -112,6 +115,7 @@ class TrackingService:
         self.running=False
         self.camera.pause_media();self.revision+=1
         with self.lock:
+            self.recordings.finish()
             frame=self.camera.find(frame_id)
             if frame is None:
                 record=next((r for r in reversed(self.history) if r[0].id==frame_id),None)
@@ -154,6 +158,7 @@ class TrackingService:
     def stop_camera(self):
         self.running = False
         with self.lock:
+            self.recordings.finish()
             self.camera.stop()
             self.editing = False
         return self.status()
@@ -162,6 +167,7 @@ class TrackingService:
         self.running = False
         self.camera.pause_media()
         with self.lock:
+            self.recordings.finish()
             self.revision+=1;self.motion=None;self.ai_seed=None
             self.ai_updates=0;self.motion_fps=None;self.last_ai_frame=None
             self.ai_error=None;self.ai_retry_at=0
@@ -182,6 +188,7 @@ class TrackingService:
         self.camera.pause_media()
         self.revision+=1
         with self.lock:
+            self.recordings.finish()
             self.motion=None;self.ai_seed=None
             record = next((r for r in reversed(self.history) if r[0].id==frame_id),None)
             if self.objects and not record:
@@ -237,6 +244,7 @@ class TrackingService:
         self.running = False
         self.camera.pause_media();self.revision+=1
         with self.lock:
+            self.recordings.finish()
             if obj_id not in self.objects:
                 raise ValueError('객체가 존재하지 않습니다.')
             self.objects.pop(obj_id)
@@ -250,6 +258,7 @@ class TrackingService:
             self.running = False
             self.camera.pause_media();self.revision+=1
             with self.lock:
+                self.recordings.pause()
                 return self.status()
         if action=='stop':
             return self.reset()
@@ -261,6 +270,11 @@ class TrackingService:
             self.editing = False
             self.error = None
             self.revision+=1
+            if self.tracking_mode=='precise' and self.camera.input_kind=='video':
+                self.recordings.start(self.camera,self.anchor,self.objects,self.model_name)
+                try:self.recordings.write(self.anchor,self.masks)
+                except Exception as exc:
+                    self.recordings.finish(error=str(exc));raise
             if self.tracking_mode=='smooth' and self.camera.input_kind!='image':
                 self.motion=MotionTracker(self.anchor,self.masks)
                 self.ai_seed=(self.anchor,{i:m.copy() for i,m in self.masks.items()})
@@ -311,7 +325,9 @@ class TrackingService:
                         continue
                     frames = self.camera.after(self.anchor.id,limit=3)
                     if not frames:
-                        if self.camera.media_ended:self.running=False
+                        if self.camera.media_ended:
+                            self.running=False
+                            self.recordings.finish(complete=True)
                         continue
                     start = time.perf_counter()
                     with self.engine_lock:outputs = self.engine.infer([self.anchor]+frames,self.masks)
@@ -321,14 +337,21 @@ class TrackingService:
                     for frame,masks in outputs[1:]:
                         self.anchor,self.masks = frame,masks
                         self._publish(frame,masks)
+                        self.recordings.write(frame,masks)
+                    if self.camera.media_ended:
+                        self.running=False
+                        self.recordings.finish(complete=True)
             except Exception as exc:
                 self.error = f'추론 실패: {exc}'
                 self.running = False
+                self.recordings.finish(error=str(exc))
 
     def select_tracking_mode(self,mode):
         if mode not in ('smooth','precise'):raise ValueError('지원하지 않는 추적 방식입니다.')
         self.control('pause')
-        with self.lock:self.tracking_mode=mode
+        with self.lock:
+            if mode!=self.tracking_mode:self.recordings.finish()
+            self.tracking_mode=mode
         return self.status()
 
     def _smooth_ai(self):
@@ -381,3 +404,4 @@ class TrackingService:
         self.motion_worker.join(timeout=5)
         self.camera.stop()
         if self.model_name=='sam3.1':self.engine.close()
+        self.recordings.close()
