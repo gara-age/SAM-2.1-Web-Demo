@@ -1,6 +1,6 @@
 .venv/
 .cache/
-models/*.pt
+models/
 vendor/
 logs/
 frontend/node_modules/

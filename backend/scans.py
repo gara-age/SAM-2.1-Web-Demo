@@ -311,12 +311,18 @@ class ScanStore:
         if final['face'].count<10:
             raise ValueError('마스크 검증 후 유효한 표면이 부족합니다. 다른 각도에서 촬영을 추가하세요.')
         import shutil
-        shutil.copyfile(cleaned,folder/'model.ply.tmp')
-        shutil.copyfile(filtered,folder/'points.ply.tmp')
+        from .scan_geometry import camera_alignment,rotate_ply,reconstruction_diagnostics
+        alignment=camera_alignment(rec)
+        diagnostics=reconstruction_diagnostics(rec,filtered,folder/'masks',len(data['captures']))
+        rotate_ply(cleaned,run/'model-upright.ply',alignment['rotation'])
+        rotate_ply(filtered,run/'points-upright.ply',alignment['rotation'])
+        shutil.copyfile(run/'model-upright.ply',folder/'model.ply.tmp')
+        shutil.copyfile(run/'points-upright.ply',folder/'points.ply.tmp')
         os.replace(folder/'model.ply.tmp',folder/'model.ply')
         os.replace(folder/'points.ply.tmp',folder/'points.ply')
-        self._update(scan_id,state='complete',stage='3D 스캔 복원 완료',progress=100,
+        self._update(scan_id,state='complete',stage='복원 처리 완료 · 형상과 누락을 확인하세요.',progress=100,
                      vertices=final['vertex'].count,faces=final['face'].count,points=points,
+                     alignment=alignment,diagnostics=diagnostics,reconstruction_run=run.name,
                      model_url=f'/api/scans/{scan_id}/model.ply',version=data['version']+1,
                      completed_at=time.time(),error=None)
 
