@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Literal
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = {'http://127.0.0.1:8000','http://localhost:8000',
            'http://127.0.0.1:5173','http://localhost:5173'}
 PORT = int(os.environ.get('SAM_PORT','8000'))
+MAX_UPLOAD_BYTES=250*1024*1024
 ALLOWED.update({f'http://127.0.0.1:{PORT}',f'http://localhost:{PORT}'})
 service = None
 scans = None
@@ -177,6 +179,7 @@ def status():
 @app.get('/api/cameras')
 async def cameras():
     if service.camera.connected:
+        if service.camera.input_kind in ('image','video'):return []
         return [] if service.camera.source in ('synthetic','example-static') else [{'id':int(service.camera.source),'name':f'Camera {service.camera.source} (connected)'}]
     return await invoke(service.camera.discover)
 
@@ -192,6 +195,36 @@ async def camera_start(body:CameraStart):
 @app.post('/api/camera/stop')
 async def camera_stop():
     return await invoke(service.stop_camera)
+
+
+@app.post('/api/media/upload')
+async def upload_media(request:Request,filename:str):
+    name=Path(filename).name[:180]
+    suffix=Path(name).suffix.lower()
+    if suffix not in {'.jpg','.jpeg','.png','.bmp','.webp','.mp4','.mov','.avi','.mkv','.m4v','.webm'}:
+        raise HTTPException(400,'JPG, PNG, WebP, BMP 또는 MP4, MOV, AVI, MKV, WebM 파일을 선택하세요.')
+    limit=MAX_UPLOAD_BYTES
+    folder=ROOT/'data'/'uploads';folder.mkdir(parents=True,exist_ok=True)
+    path=folder/(uuid.uuid4().hex+suffix)
+    size=0
+    try:
+        with path.open('xb') as output:
+            async for chunk in request.stream():
+                size+=len(chunk)
+                if size>limit:raise HTTPException(413,'최대 업로드 크기는 250MB입니다.')
+                await asyncio.to_thread(output.write,chunk)
+        if not size:raise HTTPException(400,'비어 있는 파일입니다.')
+        result=await invoke(service.open_media,path,name)
+        return dict(status=result,frame=await invoke(frame_packet,service.camera.latest()))
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+@app.post('/api/media/rewind')
+async def rewind_media():
+    result=await invoke(service.rewind_media)
+    return dict(status=result,frame=await invoke(frame_packet,service.camera.latest()))
 
 
 @app.post('/api/model/load')

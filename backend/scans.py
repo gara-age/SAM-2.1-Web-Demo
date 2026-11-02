@@ -85,6 +85,8 @@ class ScanStore:
 
     def create(self,obj_id):
         with self.tracking.lock:
+            if getattr(self.tracking.camera,'input_kind',None) in ('image','example'):
+                raise ValueError('정지 이미지 한 장으로는 3D 스캔을 만들 수 없습니다. 카메라나 여러 시점이 담긴 동영상을 사용하세요.')
             obj = self.tracking.objects.get(obj_id)
             mask = self.tracking.masks.get(obj_id)
             frame = self.tracking.anchor

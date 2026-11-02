@@ -16,6 +16,7 @@ def frame_packet(frame):
         raise RuntimeError('영상 인코딩 실패')
     h,w = frame.image.shape[:2]
     return dict(id=frame.id,timestamp=frame.timestamp,width=w,height=h,
+                source_index=frame.source_index,source_time=frame.source_time,
                 jpeg=base64.b64encode(jpeg).decode('ascii'))
 
 
@@ -46,6 +47,9 @@ class TrackingService:
                     model_precision=getattr(self.engine,'precision',None) if self.model_name=='sam3.1' else 'FP32',
                     camera_connected=self.camera.connected,camera_error=self.camera.error,
                     source=self.camera.source,camera_fps=round(self.camera.fps,1),
+                    input_kind=self.camera.input_kind,source_name=self.camera.source_name,
+                    media_index=self.camera.media_index,media_total=self.camera.media_total,
+                    media_fps=self.camera.media_fps,media_ended=self.camera.media_ended,
                     model_status=self.engine.status,model_error=self.engine.error,
                     device=self.engine.device,running=self.running,editing=self.editing,
                     inference_ms=self.inference_ms,inference_fps=self.inference_fps,
@@ -115,6 +119,18 @@ class TrackingService:
             self.reset()
             self.camera.start(**kwargs)
         return self.status()
+
+    def open_media(self,path,name):
+        self.running=False
+        with self.lock:
+            self.camera.open_media(path,name)
+            self.reset()
+        return self.status()
+
+    def rewind_media(self):
+        if self.camera.input_kind not in ('image','video') or self.camera.media_path is None:
+            raise ValueError('먼저 이미지나 동영상을 업로드하세요.')
+        return self.open_media(self.camera.media_path,self.camera.source_name)
 
     def stop_camera(self):
         self.running = False
@@ -216,7 +232,7 @@ class TrackingService:
                 raise ValueError('포함 지점을 추가하여 객체를 분할한 뒤 추적하세요.')
             self.editing = False
             self.error = None
-            self.running = True
+            self.running = self.camera.input_kind!='image'
         return self.status()
 
     def clear_paths(self):
@@ -257,6 +273,7 @@ class TrackingService:
                         continue
                     frames = self.camera.after(self.anchor.id,limit=3)
                     if not frames:
+                        if self.camera.media_ended:self.running=False
                         continue
                     start = time.perf_counter()
                     outputs = self.engine.infer([self.anchor]+frames,self.masks)
