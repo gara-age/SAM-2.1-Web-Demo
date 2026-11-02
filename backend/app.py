@@ -12,6 +12,7 @@ from fastapi.responses import Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from .service import TrackingService, frame_packet
+from .scans import ScanStore
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = {'http://127.0.0.1:8000','http://localhost:8000',
@@ -19,13 +20,16 @@ ALLOWED = {'http://127.0.0.1:8000','http://localhost:8000',
 PORT = int(os.environ.get('SAM_PORT','8000'))
 ALLOWED.update({f'http://127.0.0.1:{PORT}',f'http://localhost:{PORT}'})
 service = None
+scans = None
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global service
+    global service,scans
     service = TrackingService()
+    scans = ScanStore(service)
     yield
+    await asyncio.to_thread(scans.close)
     await asyncio.to_thread(service.close)
 
 
@@ -75,6 +79,73 @@ class Points(BaseModel):
 
 class Control(BaseModel):
     action: Literal['start','pause','stop']
+
+
+class ScanCreate(BaseModel):
+    object_id: int = Field(ge=1)
+
+
+@app.get('/api/scans')
+async def list_scans():
+    return await invoke(scans.list)
+
+
+@app.post('/api/scans')
+async def create_scan(body:ScanCreate):
+    result=await invoke(scans.create,body.object_id)
+    await invoke(service.control,'start')
+    return result
+
+
+@app.get('/api/scans/{scan_id}')
+async def get_scan(scan_id:str):
+    return await invoke(scans.get,scan_id)
+
+
+@app.post('/api/scans/{scan_id}/capture')
+async def capture_scan(scan_id:str,body:Pin):
+    return await invoke(scans.capture,scan_id,body.frame_id)
+
+
+@app.delete('/api/scans/{scan_id}/captures/{name}')
+async def remove_scan_capture(scan_id:str,name:str):
+    return await invoke(scans.remove_capture,scan_id,name)
+
+
+@app.post('/api/scans/{scan_id}/reconstruct')
+async def reconstruct_scan(scan_id:str):
+    await invoke(service.control,'pause')
+    return await invoke(scans.reconstruct,scan_id)
+
+
+@app.post('/api/scans/{scan_id}/cancel')
+async def cancel_scan(scan_id:str):
+    return await invoke(scans.cancel,scan_id)
+
+
+@app.get('/api/scans/{scan_id}/thumb/{name}')
+async def scan_thumbnail(scan_id:str,name:str):
+    import re
+    if not re.fullmatch(r'\d{5}\.jpg',name):
+        raise HTTPException(404)
+    folder=await invoke(scans.folder,scan_id)
+    path=folder/'thumbs'/name
+    if not path.is_file(): raise HTTPException(404)
+    return FileResponse(path,media_type='image/jpeg')
+
+
+@app.get('/api/scans/{scan_id}/{filename}')
+async def scan_result_file(scan_id:str,filename:Literal['model.ply','points.ply','log.txt']):
+    data=await invoke(scans.get,scan_id)
+    folder=await invoke(scans.folder,scan_id)
+    if filename=='log.txt':
+        path=folder/'reconstruction.log'
+        if not path.is_file(): raise HTTPException(404)
+        return FileResponse(path,media_type='text/plain',filename='reconstruction.log')
+    path=folder/filename
+    if not data['model_url'] or not path.is_file(): raise HTTPException(404)
+    return FileResponse(path,media_type='application/octet-stream',filename=filename,
+                        headers={'Cache-Control':'no-cache'})
 
 
 @app.get('/api/status')

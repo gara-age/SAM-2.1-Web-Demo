@@ -41,7 +41,7 @@ class TrackingService:
         self.worker.start()
 
     def status(self):
-        return dict(camera_connected=self.camera.connected,camera_error=self.camera.error,
+        return dict(server_version='0.2.0',camera_connected=self.camera.connected,camera_error=self.camera.error,
                     source=self.camera.source,camera_fps=round(self.camera.fps,1),
                     model_status=self.engine.status,model_error=self.engine.error,
                     device=self.engine.device,running=self.running,editing=self.editing,

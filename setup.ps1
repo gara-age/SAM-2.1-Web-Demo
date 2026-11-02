@@ -20,4 +20,5 @@ if (!(Test-Path -LiteralPath 'models\sam2.1_hiera_tiny.pt')) {
 }
 Push-Location frontend
 try { npm.cmd ci; Check-Exit; npm.cmd run build; Check-Exit } finally { Pop-Location }
+& (Join-Path $PSScriptRoot 'setup-scan.ps1')
 Write-Host '설치 완료. start.cmd를 실행하세요.' -ForegroundColor Green
