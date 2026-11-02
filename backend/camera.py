@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 import cv2
 import numpy as np
+from pathlib import Path
 
 
 @dataclass
@@ -35,10 +36,15 @@ class Camera:
             cap.release()
         return devices
 
-    def start(self, device, width, height, fps, synthetic=False):
+    def start(self, device, width, height, fps, synthetic=False, example=False):
         self.stop()
         cap = None
-        if not synthetic:
+        sample=None
+        if example:
+            path=Path(__file__).resolve().parents[1]/'vendor'/'sam3'/'assets'/'videos'/'0001'/'0.jpg'
+            sample=cv2.imread(str(path))
+            if sample is None:raise ValueError('공식 예제 이미지가 없습니다. setup-sam31.ps1을 실행하세요.')
+        elif not synthetic:
             cap = cv2.VideoCapture(device, cv2.CAP_DSHOW)
             if not cap.isOpened():
                 cap.release()
@@ -51,17 +57,19 @@ class Camera:
         self.error = None
         self.fps = 0
         self.connected = True
-        self.source = 'synthetic' if synthetic else str(device)
+        self.source = 'example-static' if example else 'synthetic' if synthetic else str(device)
         self.stop_event.clear()
-        self.thread = threading.Thread(target=self._loop, args=(cap,width,height,fps), daemon=True)
+        self.thread = threading.Thread(target=self._loop, args=(cap,width,height,fps,sample), daemon=True)
         self.thread.start()
 
-    def _loop(self, cap, width, height, fps):
+    def _loop(self, cap, width, height, fps,sample=None):
         times = deque(maxlen=60)
         try:
             while not self.stop_event.is_set():
                 start = time.monotonic()
-                if cap is None:
+                if sample is not None:
+                    image=sample.copy()
+                elif cap is None:
                     image = np.full((height,width,3), (30,24,18), np.uint8)
                     x = int(width*.45 + np.sin(time.monotonic()*.4)*width*.12)
                     cv2.rectangle(image,(x-60,height//2-60),(x+60,height//2+60),(45,165,240),-1)

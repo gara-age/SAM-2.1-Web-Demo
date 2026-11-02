@@ -16,3 +16,4 @@ __pycache__/
 data/
 scans/
 backups/
+.venv-sam31-wsl/

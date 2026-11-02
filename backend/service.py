@@ -23,6 +23,7 @@ class TrackingService:
     def __init__(self):
         self.camera = Camera()
         self.engine = SamEngine()
+        self.model_name = 'sam2.1'
         self.lock = threading.RLock()
         self.shutdown_event = threading.Event()
         self.running = False
@@ -41,7 +42,9 @@ class TrackingService:
         self.worker.start()
 
     def status(self):
-        return dict(server_version='0.2.0',camera_connected=self.camera.connected,camera_error=self.camera.error,
+        return dict(server_version='0.3.0',model_name=self.model_name,
+                    model_precision=getattr(self.engine,'precision',None) if self.model_name=='sam3.1' else 'FP32',
+                    camera_connected=self.camera.connected,camera_error=self.camera.error,
                     source=self.camera.source,camera_fps=round(self.camera.fps,1),
                     model_status=self.engine.status,model_error=self.engine.error,
                     device=self.engine.device,running=self.running,editing=self.editing,
@@ -53,6 +56,58 @@ class TrackingService:
         with self.lock:
             self.engine.load()
         return self.status()
+
+    def release_model(self):
+        import gc
+        import torch
+        self.running=False
+        with self.lock:
+            if self.model_name=='sam3.1':self.engine.close()
+            else:
+                self.engine.predictor=None
+                self.engine.status='not_loaded'
+                gc.collect()
+                if torch.cuda.is_available():torch.cuda.empty_cache()
+        return self.status()
+
+    def select_model(self,name):
+        if name not in ('sam2.1','sam3.1'):raise ValueError('지원하지 않는 모델입니다.')
+        self.running=False
+        with self.lock:
+            if name!=self.model_name:
+                self.release_model();self.reset()
+                if name=='sam3.1':
+                    from .sam31 import Sam31Engine
+                    self.engine=Sam31Engine()
+                else:self.engine=SamEngine()
+                self.model_name=name
+        return self.status()
+
+    def select_text(self,frame_id,text):
+        from .prompts import concept_prompt
+        prompt=concept_prompt(text)
+        if self.model_name!='sam3.1':raise ValueError('텍스트 선택은 SAM 3.1 모드에서 사용할 수 있습니다.')
+        self.running=False
+        with self.lock:
+            frame=self.camera.find(frame_id)
+            if frame is None:
+                record=next((r for r in reversed(self.history) if r[0].id==frame_id),None)
+                frame=record[0] if record else None
+            if frame is None:raise ValueError('프레임이 만료됐습니다. 최신 영상으로 다시 선택하세요.')
+            start=time.perf_counter()
+            predictions=self.engine.segment_text(frame,prompt)
+            predictions={i:m for i,m in predictions.items() if m.any()}
+            if not predictions:raise ValueError(f'"{prompt}"에 해당하는 객체를 찾지 못했습니다.')
+            self.objects.clear();self.masks.clear();self.history.clear()
+            for mask in list(predictions.values())[:4]:
+                obj_id=self.next_id;self.next_id+=1
+                self.objects[obj_id]=dict(id=obj_id,name=f'{prompt} {obj_id:02}',
+                    color=COLORS[(obj_id-1)%len(COLORS)],points=[],path=[],source_prompt=prompt)
+                self.masks[obj_id]=mask
+            self.anchor=frame;self.editing=True;self.error=None
+            self.inference_ms=round((time.perf_counter()-start)*1000,1)
+            self._publish(frame,self.masks,False)
+            return dict(packet=self.packet,prompt=prompt,count=len(self.objects),model='sam3.1')
 
     def start_camera(self, **kwargs):
         self.running = False
@@ -104,6 +159,8 @@ class TrackingService:
         with self.lock:
             if not self.editing or self.anchor is None:
                 raise ValueError('먼저 프레임을 고정하세요.')
+            if self.model_name=='sam3.1' and len(self.objects)>=4:
+                raise ValueError('현재 SAM 3.1 실험 모드는 최대 4개 객체를 지원합니다.')
             obj_id = self.next_id
             self.next_id += 1
             self.objects[obj_id] = dict(id=obj_id,name=f'Object {obj_id:02}',
@@ -179,7 +236,7 @@ class TrackingService:
             if append_path and geometry['center']:
                 obj['path'] = (obj['path'] + [dict(frame_id=frame.id,center=geometry['center'])])[-120:]
             objects.append(dict(**obj,**geometry,status=('Active' if geometry['area'] else
-                              'Lost' if obj['points'] else 'Pending'),frame_id=frame.id,
+                              'Lost' if obj['points'] or obj.get('source_prompt') or obj_id in masks else 'Pending'),frame_id=frame.id,
                               timestamp=frame.timestamp,
                               mask_png=png_mask(mask) if mask is not None else None))
         self.packet = dict(frame=frame_packet(frame),objects=objects)
@@ -218,3 +275,4 @@ class TrackingService:
         self.shutdown_event.set()
         self.worker.join(timeout=30)
         self.camera.stop()
+        if self.model_name=='sam3.1':self.engine.close()

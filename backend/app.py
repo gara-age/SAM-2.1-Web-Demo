@@ -60,6 +60,7 @@ class CameraStart(BaseModel):
     height: Literal[480,720] = 480
     fps: int = Field(30,ge=1,le=30)
     synthetic: bool = False
+    example: bool = False
 
 
 class Pin(BaseModel):
@@ -79,6 +80,25 @@ class Points(BaseModel):
 
 class Control(BaseModel):
     action: Literal['start','pause','stop']
+
+
+class ModelSelect(BaseModel):
+    model: Literal['sam2.1','sam3.1']
+
+
+class TextSelect(BaseModel):
+    frame_id: int
+    text: str = Field(min_length=1,max_length=120)
+
+
+@app.post('/api/model/select')
+async def select_model(body:ModelSelect):
+    return await invoke(service.select_model,body.model)
+
+
+@app.post('/api/objects/text')
+async def text_select(body:TextSelect):
+    return await invoke(service.select_text,body.frame_id,body.text)
 
 
 class ScanCreate(BaseModel):
@@ -115,6 +135,7 @@ async def remove_scan_capture(scan_id:str,name:str):
 @app.post('/api/scans/{scan_id}/reconstruct')
 async def reconstruct_scan(scan_id:str):
     await invoke(service.control,'pause')
+    if service.model_name=='sam3.1':await invoke(service.release_model)
     return await invoke(scans.reconstruct,scan_id)
 
 
@@ -156,12 +177,13 @@ def status():
 @app.get('/api/cameras')
 async def cameras():
     if service.camera.connected:
-        return [] if service.camera.source=='synthetic' else [{'id':int(service.camera.source),'name':f'Camera {service.camera.source} (connected)'}]
+        return [] if service.camera.source in ('synthetic','example-static') else [{'id':int(service.camera.source),'name':f'Camera {service.camera.source} (connected)'}]
     return await invoke(service.camera.discover)
 
 
 @app.post('/api/camera/start')
 async def camera_start(body:CameraStart):
+    if body.synthetic and body.example:raise HTTPException(400,'영상 입력은 하나만 선택하세요.')
     if (body.width,body.height) not in [(640,480),(1280,720)]:
         raise HTTPException(400,'지원하지 않는 해상도')
     return await invoke(service.start_camera,**body.model_dump())

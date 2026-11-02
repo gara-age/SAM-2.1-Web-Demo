@@ -93,6 +93,7 @@ class ScanStore:
             if not self.tracking.camera.connected:
                 raise ValueError('카메라를 먼저 시작하세요.')
             data = dict(id=uuid.uuid4().hex,object_id=obj_id,object_name=obj['name'],
+                        tracking_model=getattr(self.tracking,'model_name','sam2.1'),
                         source=self.tracking.camera.source,width=frame.image.shape[1],
                         height=frame.image.shape[0],created_at=time.time(),state='capturing',
                         stage='서로 다른 각도의 분석 프레임을 촬영하세요.',error=None,
@@ -115,6 +116,8 @@ class ScanStore:
                 raise ValueError('선택 객체가 소실되었거나 삭제되었습니다. 객체 마스크를 보정하세요.')
             if self.tracking.camera.source!=data['source']:
                 raise ValueError('촬영 중 입력 장치를 변경했습니다. 새 스캔을 시작하세요.')
+            if getattr(self.tracking,'model_name','sam2.1')!=data.get('tracking_model','sam2.1'):
+                raise ValueError('선택·추적 모델이 변경되었습니다. 새 스캔을 시작하세요.')
             image=record[0].image.copy()
             mask=mask.copy()
             timestamp=record[0].timestamp
