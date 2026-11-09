@@ -32,6 +32,33 @@ def test_no_features_means_lost_instead_of_static_fake_mask():
     assert not tracker.advance(Frame(2,time.time(),frame.image))[1].any()
 
 
+def test_sam2_next_inference_uses_native_mask_and_frame_not_delayed_flow_result(tmp_path):
+    service=TrackingService(recordings_root=tmp_path)
+    service.shutdown_event.set();service.worker.join();service.motion_worker.join()
+    first,initial=scene(0);target,_=scene(1);later,_=scene(2)
+    native=np.zeros_like(initial);native[40:80,40:75]=True
+    calls=[]
+    def infer(frames,masks):
+        calls.append((list(frames),{i:m.copy() for i,m in masks.items()}))
+        if len(calls)==1:service.motion.advance(later)
+        return [(frames[-1],{1:native.copy()})]
+    try:
+        service.engine=SimpleNamespace(infer=infer,status='ready',error=None,device='cpu')
+        service.running=True;service.motion=MotionTracker(first,{1:initial})
+        service.ai_seed=(first,{1:initial});service.motion.advance(target)
+        service._smooth_ai()
+        assert service.motion.frame.id==later.id
+        assert service.ai_seed[0].id==target.id
+        assert np.array_equal(service.ai_seed[1][1],native)
+        # Simulate a badly expanded display mask. It must not feed back to SAM.
+        service.motion.masks[1]=np.ones_like(initial)
+        service._smooth_ai()
+        assert calls[1][0][0].id==target.id
+        assert calls[1][0][1].id==later.id
+        assert np.array_equal(calls[1][1][1],native)
+    finally:service.close()
+
+
 def test_both_models_play_while_slow_sam_runs_and_pause_is_responsive(tmp_path):
     for model in ('sam2.1','sam3.1'):
         service=TrackingService()

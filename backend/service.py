@@ -372,7 +372,14 @@ class TrackingService:
                     self.masks={i:m.copy() for i,m in motion.masks.items()}
                     self.ai_updates+=1;self.last_ai_frame=target.id
                 self.ai_error=None
-                self.ai_seed=(motion.frame,{i:m.copy() for i,m in motion.masks.items()})
+                if self.model_name=='sam2.1' and outputs:
+                    # Keep SAM's temporal track independent of optical-flow drift.
+                    # The displayed mask may be warped to a newer frame, but that
+                    # approximation must not become the next SAM input mask.
+                    native_frame,native_masks=outputs[-1]
+                    self.ai_seed=(native_frame,{i:m.copy() for i,m in native_masks.items()})
+                else:
+                    self.ai_seed=(motion.frame,{i:m.copy() for i,m in motion.masks.items()})
         except Exception as exc:
             with self.lock:
                 if revision==self.revision:
