@@ -57,9 +57,11 @@ class TrackingService:
         self.worker.start()
         self.motion_worker=threading.Thread(target=self._motion_loop,daemon=True)
         self.motion_worker.start()
+        self.selecting_live=False
 
     def status(self):
         return dict(server_version='0.3.0',model_name=self.model_name,
+                    selecting_live=self.selecting_live,
                     recording=self.recordings.status(),
                     tracking_mode=self.tracking_mode,ai_busy=self.ai_busy,ai_updates=self.ai_updates,
                     ai_error=self.ai_error,
@@ -142,6 +144,51 @@ class TrackingService:
             self.reset()
             self.camera.start(**kwargs)
         return self.status()
+
+    def select_live(self,frame_id,x,y):
+        with self.lock:
+            if not self.camera.connected or self.camera.input_kind!='live':
+                raise ValueError('실시간 클릭 선택은 연결된 카메라 입력에서 사용하세요.')
+            if self.tracking_mode!='smooth':raise ValueError('연속 재생 모드에서 실시간 클릭 선택을 사용하세요.')
+            if self.engine.status!='ready':raise ValueError('모델을 먼저 불러온 뒤 실시간으로 선택하세요.')
+            if self.selecting_live:raise ValueError('이전 클릭의 선택 처리가 진행 중입니다.')
+            frame=self.camera.find(frame_id)
+            if frame is None:raise ValueError('클릭한 프레임이 만료됐습니다. 최신 영상에서 다시 클릭하세요.')
+            h,w=frame.image.shape[:2]
+            if not (0<=x<w and 0<=y<h):raise ValueError('좌표가 영상 범위를 벗어났습니다.')
+            self.running=False;self.editing=False;self.revision+=1
+            revision=self.revision;engine=self.engine;source=self.camera.source
+            self.recordings.finish();self.selecting_live=True
+            obj_id=self.next_id;self.next_id+=1
+        try:
+            start=time.perf_counter()
+            points=[dict(x=x,y=y,label=1)]
+            with self.engine_lock:outputs=engine.infer([frame],{},target=obj_id,points=points)
+            masks=outputs[-1][1] if outputs else {}
+            mask=masks.get(obj_id)
+            if mask is None or not mask.any():raise ValueError('클릭한 대상을 분할하지 못했습니다. 대상 안쪽을 다시 클릭하세요.')
+            with self.lock:
+                if revision!=self.revision or engine is not self.engine or source!=self.camera.source or not self.camera.connected:
+                    raise ValueError('선택 중 입력이나 작업 상태가 변경되어 결과를 적용하지 않았습니다.')
+                with self.camera.lock:
+                    latest=self.camera.frames[-1]
+                    pending=[f for f in self.camera.frames if frame.id<f.id<=latest.id]
+                if latest.id>frame.id and (not pending or pending[0].id!=frame.id+1):
+                    raise ValueError('선택 처리가 영상 버퍼보다 오래 걸렸습니다. 최신 영상에서 다시 클릭하세요.')
+                motion=MotionTracker(frame,{obj_id:mask})
+                for current in pending:motion.advance(current)
+                if not motion.masks[obj_id].any():
+                    raise ValueError('선택을 계산하는 동안 대상을 놓쳤습니다. 최신 위치를 다시 클릭하세요.')
+                self.objects={obj_id:dict(id=obj_id,name=f'Object {obj_id:02}',color=COLORS[(obj_id-1)%len(COLORS)],
+                    points=[dict(x=x,y=y,label=1,frame_id=frame.id)],path=[])}
+                self.motion=motion;self.anchor=motion.frame;self.masks=dict(motion.masks)
+                self.ai_seed=(frame,{obj_id:mask.copy()});self.history.clear()
+                self.ai_updates=0;self.ai_error=None;self.ai_retry_at=0;self.error=None
+                self.inference_ms=round((time.perf_counter()-start)*1000,1)
+                self.running=True;self._publish(self.anchor,self.masks)
+                self.selecting_live=False
+                return dict(id=obj_id,packet=self.packet,status=self.status(),clicked_frame_id=frame.id)
+        finally:self.selecting_live=False
 
     def open_media(self,path,name):
         self.running=False

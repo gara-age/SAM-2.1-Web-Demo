@@ -80,6 +80,17 @@ class Points(BaseModel):
     points: list[Point] = Field(max_length=64)
 
 
+class LiveSelect(BaseModel):
+    frame_id:int
+    x:int=Field(ge=0)
+    y:int=Field(ge=0)
+
+
+@app.post('/api/objects/live')
+async def live_select(body:LiveSelect):
+    return await invoke(service.select_live,body.frame_id,body.x,body.y)
+
+
 class Control(BaseModel):
     action: Literal['start','pause','stop']
 
