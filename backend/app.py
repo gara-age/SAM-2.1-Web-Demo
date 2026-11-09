@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from .service import TrackingService, frame_packet
 from .scans import ScanStore
+from .depth import DepthPreview
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = {'http://127.0.0.1:8000','http://localhost:8000',
@@ -24,14 +25,17 @@ ALLOWED.update({f'http://127.0.0.1:{PORT}',f'http://localhost:{PORT}'})
 ALLOWED.update(origin.strip().rstrip('/') for origin in os.environ.get('SAM_ALLOWED_ORIGINS','').split(',') if origin.strip())
 service = None
 scans = None
+depth_preview = None
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global service,scans
+    global service,scans,depth_preview
     service = TrackingService()
     scans = ScanStore(service)
+    depth_preview = DepthPreview(service)
     yield
+    await asyncio.to_thread(depth_preview.close)
     await asyncio.to_thread(scans.close)
     await asyncio.to_thread(service.close)
 
@@ -55,6 +59,16 @@ async def invoke(func,*args,**kwargs):
         raise HTTPException(400,str(exc)) from exc
     except Exception as exc:
         raise HTTPException(503,str(exc)) from exc
+
+
+class DepthRequest(BaseModel):
+    object_id: int = Field(ge=1)
+    since: int | None = None
+
+
+@app.post('/api/depth/preview')
+async def request_depth(body:DepthRequest):
+    return await invoke(depth_preview.request,body.object_id,body.since)
 
 
 class CameraStart(BaseModel):
