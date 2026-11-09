@@ -47,6 +47,17 @@ def test_local_origin_guard_and_request_bounds():
         assert client.post('/api/tracking',json={'action':'start'}).status_code==400
 
 
+def test_configured_lan_origin_can_control_and_receive_status(monkeypatch):
+    origin='http://172.16.52.67:8000'
+    monkeypatch.setattr(module,'ALLOWED',module.ALLOWED|{origin})
+    with TestClient(app) as client:
+        assert client.post('/api/reset',headers={'Origin':origin}).status_code==200
+        assert client.post('/api/reset',headers={'Origin':'http://unconfigured.example:8000'}).status_code==403
+        with client.websocket_connect('/ws',headers={'Origin':origin}) as socket:
+            message=socket.receive_json()
+            assert message['type']=='status'
+
+
 def test_pinning_history_does_not_restore_deleted_masks_or_future_paths():
     with TestClient(app) as client:
         service=module.service

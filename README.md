@@ -1,5 +1,19 @@
 # SAM 2.1 Vision Console
 
+## 같은 학교망에서 접속
+
+LAN 모드는 `.cache/lan-config.json`의 `enabled`, `port`, `origins` 설정을 `start.ps1`이 읽어 실행합니다. LAN 모드가 없거나 꺼져 있으면 기존처럼 127.0.0.1에서만 실행합니다. `origins`의 주소를 HTTP 제어 요청과 WebSocket 양쪽에서 허용합니다. 로컬 설정 파일은 Git에서 제외됩니다.
+
+Windows 방화벽 규칙은 관리자 PowerShell에서 프로젝트의 `setup-lan-firewall.ps1`을 실행해 추가합니다. 예:
+
+```powershell
+.\setup-lan-firewall.ps1 -LocalAddress 172.16.52.67 -RemoteSubnet 172.16.52.0/24 -Port 8000
+```
+
+이 규칙은 해당 로컬 IP와 이더넷 인터페이스의 TCP 8000을 지정된 원격 대역에 허용합니다. 방화벽 전체를 끄지 않습니다. 현재 Windows 계정이 일반 사용자이면 관리자 계정 승인이 필요합니다. 적용 결과는 `.cache/lan-firewall-result.json`에서 확인합니다.
+
+다른 PC에서 서버의 LAN 주소로 접속합니다. 접속한 사람들은 서버의 카메라·선택·추적 상태를 공유합니다. IP나 학교망 대역이 바뀌면 로컬 LAN 설정과 방화벽 규칙을 함께 갱신해야 합니다.
+
 ## 실시간 클릭 선택과 이미지 평면 보기
 
 - 모델을 먼저 불러오고 USB 카메라를 연속 재생 모드로 시작합니다. 선택 객체가 없으면 **실시간 클릭 선택**이 자동으로 켜집니다. 움직이는 원본에서 대상 안쪽을 왼쪽 클릭하면 프레임 고정·별도 확정 없이 분할 후 자동 추적합니다.

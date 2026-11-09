@@ -21,6 +21,7 @@ ALLOWED = {'http://127.0.0.1:8000','http://localhost:8000',
 PORT = int(os.environ.get('SAM_PORT','8000'))
 MAX_UPLOAD_BYTES=250*1024*1024
 ALLOWED.update({f'http://127.0.0.1:{PORT}',f'http://localhost:{PORT}'})
+ALLOWED.update(origin.strip().rstrip('/') for origin in os.environ.get('SAM_ALLOWED_ORIGINS','').split(',') if origin.strip())
 service = None
 scans = None
 
