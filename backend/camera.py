@@ -19,6 +19,7 @@ class Frame:
 class Camera:
     def __init__(self):
         self.frames = deque(maxlen=120)
+        self.frame_event=threading.Event()
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.thread = None
@@ -107,6 +108,7 @@ class Camera:
                 self.frames.clear()
                 self.frames.append(Frame(self.next_id,time.time(),image,0,0.0))
                 self.next_id+=1
+            self.frame_event.set()
             if kind=='video':
                 self.stop_event.clear()
                 self.thread=threading.Thread(target=self._video_loop,daemon=True)
@@ -134,6 +136,7 @@ class Camera:
                 self.frames.append(Frame(self.next_id,time.time(),image,self.media_index,self.media_index/self.media_fps))
                 self.next_id+=1
                 self.fps=self.media_fps
+                self.frame_event.set()
             self.stop_event.wait(max(0,1/self.media_fps-(time.monotonic()-start)))
 
     def _loop(self, cap, width, height, fps,sample=None):
@@ -161,6 +164,7 @@ class Camera:
                 self.next_id += 1
                 with self.lock:
                     self.frames.append(frame)
+                self.frame_event.set()
                 times.append(time.monotonic())
                 if len(times)>1:
                     self.fps = (len(times)-1)/(times[-1]-times[0])
@@ -204,6 +208,7 @@ class Camera:
         return [candidates[i] for i in np.linspace(0,len(candidates)-1,limit,dtype=int)]
 
     def stop(self):
+        self.frame_event.set()
         self.pause_media();self.continuous=False
         self.stop_event.set()
         if self.thread is not None:

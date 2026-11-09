@@ -13,13 +13,15 @@ COLORS = ['#48ddac','#69a6ff','#ffb866','#ce8eff','#ff788e','#73dce8']
 
 
 def frame_packet(frame):
-    ok,jpeg = cv2.imencode('.jpg',frame.image,[cv2.IMWRITE_JPEG_QUALITY,82])
-    if not ok:
-        raise RuntimeError('영상 인코딩 실패')
+    jpeg=getattr(frame,'_jpeg_base64',None)
+    if jpeg is None:
+        ok,encoded = cv2.imencode('.jpg',frame.image,[cv2.IMWRITE_JPEG_QUALITY,82])
+        if not ok:raise RuntimeError('영상 인코딩 실패')
+        jpeg=base64.b64encode(encoded).decode('ascii');frame._jpeg_base64=jpeg
     h,w = frame.image.shape[:2]
     return dict(id=frame.id,timestamp=frame.timestamp,width=w,height=h,
                 source_index=frame.source_index,source_time=frame.source_time,
-                jpeg=base64.b64encode(jpeg).decode('ascii'))
+                jpeg=jpeg)
 
 
 class TrackingService:
@@ -66,6 +68,7 @@ class TrackingService:
                     tracking_mode=self.tracking_mode,ai_busy=self.ai_busy,ai_updates=self.ai_updates,
                     ai_error=self.ai_error,
                     motion_fps=self.motion_fps,last_ai_frame=self.last_ai_frame,
+                    tracking_latency_ms=self.packet.get('processing_ms') if self.packet and self.running else None,
                     model_precision=getattr(self.engine,'precision',None) if self.model_name=='sam3.1' else 'FP32',
                     camera_connected=self.camera.connected,camera_error=self.camera.error,
                     source=self.camera.source,camera_fps=round(self.camera.fps,1),
@@ -339,9 +342,10 @@ class TrackingService:
 
     def _publish(self,frame,masks,append_path=True):
         objects = []
+        compact=self.running and self.tracking_mode=='smooth'
         for obj_id,obj in self.objects.items():
             mask = masks.get(obj_id)
-            geometry = measure(mask) if mask is not None else dict(
+            geometry = measure(mask,compact=compact) if mask is not None else dict(
                 area=0,area_percent=0,bbox=None,width=None,height=None,center=None,corners=[],contours=[])
             if append_path and geometry['center']:
                 obj['path'] = (obj['path'] + [dict(frame_id=frame.id,center=geometry['center'])])[-120:]
@@ -350,10 +354,26 @@ class TrackingService:
                               timestamp=frame.timestamp,
                               mask_png=png_mask(mask) if mask is not None else None))
         self.packet = dict(frame=frame_packet(frame),objects=objects,
+                          processing_ms=round(max(0,(time.time()-frame.timestamp)*1000),1),
                           tracking_method='optical-flow+SAM' if self.motion is not None and self.motion.frame.id==frame.id and self.tracking_mode=='smooth' else 'SAM',
                           model=self.model_name)
         self.history.append((frame,dict(masks)))
         self.version += 1
+
+    def export_packet(self):
+        with self.lock:
+            packet=self.packet
+            if packet is None:return None
+            masks=dict(self.history[-1][1]) if self.history and self.history[-1][0].id==packet['frame']['id'] else {}
+        # Display contours are losslessly compressed at straight runs. Rebuild
+        # the complete pixel contour only for exports, using that exact frame.
+        objects=[]
+        for obj in packet['objects']:
+            full=dict(obj)
+            if obj.get('contours_simplified') and obj['id'] in masks:
+                full.update(measure(masks[obj['id']]))
+            objects.append(full)
+        return dict(packet,objects=objects)
 
     def _loop(self):
         while not self.shutdown_event.wait(.02):
@@ -436,8 +456,12 @@ class TrackingService:
 
     def _motion_loop(self):
         last_time=time.monotonic()
-        while not self.shutdown_event.wait(.015):
-            if not self.running or self.tracking_mode!='smooth':continue
+        while not self.shutdown_event.is_set():
+            if not self.running or self.tracking_mode!='smooth':
+                self.shutdown_event.wait(.02);continue
+            self.camera.frame_event.wait(.05)
+            self.camera.frame_event.clear()
+            if self.shutdown_event.is_set():break
             try:
                 with self.lock:
                     if not self.running or self.motion is None:continue

@@ -307,7 +307,7 @@ async def clear_paths():
 @app.get('/api/export/{kind}')
 async def export(kind:Literal['json','csv']):
     # The immutable published packet binds all values to one source frame.
-    packet = service.packet
+    packet = await invoke(service.export_packet)
     if not packet:
         raise HTTPException(400,'내보낼 분석 결과가 없습니다.')
     clean = dict(frame={k:v for k,v in packet['frame'].items() if k!='jpeg'},
@@ -337,24 +337,38 @@ async def websocket(ws:WebSocket):
         return
     await ws.accept()
     last_frame,last_version,last_status = -1,-1,0
+    preview_enabled=True
+    disconnected=asyncio.Event()
+    async def options():
+        nonlocal preview_enabled
+        try:
+            while True:
+                message=await ws.receive_json()
+                if isinstance(message,dict) and message.get('type')=='preview' and isinstance(message.get('enabled'),bool):
+                    preview_enabled=message['enabled']
+        except (WebSocketDisconnect,RuntimeError,ValueError):disconnected.set()
+    reader=asyncio.create_task(options())
     try:
-        while True:
+        while not disconnected.is_set():
             now = asyncio.get_running_loop().time()
             if now-last_status>.5:
-                await ws.send_json(dict(type='status',data=service.status()))
+                await ws.send_json(dict(type='status',data=dict(service.status(),stream_preview=preview_enabled)))
                 last_status = now
             version,packet = service.version,service.packet
             if version!=last_version:
                 await ws.send_json(dict(type='result',data=packet))
                 last_version = version
-            frame = service.camera.latest()
+            frame = service.camera.latest() if preview_enabled else None
             if service.camera.connected and frame and frame.id!=last_frame:
                 data = await asyncio.to_thread(frame_packet,frame)
                 await ws.send_json(dict(type='preview',data=data))
                 last_frame = frame.id
-            await asyncio.sleep(1/30)
+            await asyncio.sleep(1/60)
     except (WebSocketDisconnect,RuntimeError,OSError):
         pass
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader,return_exceptions=True)
 
 
 DIST = ROOT/'frontend'/'dist'
